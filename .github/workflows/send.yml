@@ -108,11 +108,61 @@ jobs:
       - name: Run
         shell: bash
         run: |
+          mkdir -p artifacts
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
-            python run.py --dry-run
+            python run.py --dry-run 2>&1 | tee artifacts/run.log
           else
-            python run.py
+            python run.py 2>&1 | tee artifacts/run.log
           fi
+      - name: Send result to QQ Mail
+        if: always()
+        shell: bash
+        env:
+          QQ_USER: ${{ secrets.QQ_SMTP_USER }}
+          QQ_AUTH: ${{ secrets.QQ_SMTP_AUTHCODE }}
+          RUN_STATUS: ${{ job.status }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import os, smtplib, ssl
+          from email.message import EmailMessage
+
+          user = os.environ["QQ_USER"]
+          auth = os.environ["QQ_AUTH"]
+          status = os.environ["RUN_STATUS"]
+          event = os.environ["EVENT_NAME"]
+          run_url = os.environ["RUN_URL"]
+          sha = os.environ["COMMIT_SHA"]
+
+          log_path = "artifacts/run.log"
+          try:
+              with open(log_path, encoding="utf-8", errors="replace") as f:
+                  log = f.read()
+          except FileNotFoundError:
+              log = "(无日志文件)"
+
+          msg = EmailMessage()
+          msg["Subject"] = f"抖音自动发送 - {event} - {status}"
+          msg["From"] = user
+          msg["To"] = user
+          body = (
+              f"工作流：Send Douyin Messages\n"
+              f"触发方式：{event}\n"
+              f"运行状态：{status}\n"
+              f"提交：{sha}\n"
+              f"详情：{run_url}\n\n"
+              f"===== 运行日志（最近 8000 字） =====\n{log[-8000:]}"
+          )
+          msg.set_content(body)
+
+          ctx = ssl.create_default_context()
+          with smtplib.SMTP_SSL("smtp.qq.com", 465, context=ctx) as server:
+              server.login(user, auth)
+              server.send_message(msg)
+          print("邮件已发送至", user)
+          PY
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
