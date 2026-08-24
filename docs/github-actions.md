@@ -12,7 +12,7 @@
 
 打开项目仓库：
 
-**https://github.com/unmev/douyin-auto-fire**
+**<https://github.com/unmev/douyin-auto-fire>**
 
 点击右上角 **Fork**，将项目 Fork 到自己的 GitHub 账号。
 
@@ -46,7 +46,7 @@ Send Douyin Messages
 
 使用电脑浏览器打开：
 
-**https://www.douyin.com/**
+**<https://www.douyin.com/>**
 
 登录自己的抖音账号，并确认能够正常进入私信页面。
 
@@ -54,7 +54,7 @@ Send Douyin Messages
 
 推荐使用浏览器扩展 **Cookie-Editor**：
 
-**https://chromewebstore.google.com/detail/hlkenndednhfkekhgcdicdfddnkalmdm**
+**<https://chromewebstore.google.com/detail/hlkenndednhfkekhgcdicdfddnkalmdm>**
 
 安装完成后，回到已经登录抖音的页面并打开 Cookie-Editor。
 
@@ -100,7 +100,7 @@ Send Douyin Messages
 
 如果不想自己写 JSON，可以直接使用配置生成器：
 
-**https://douyin-config.pages.dev/**
+**<https://douyin-config.pages.dev/>**
 
 生成完成后复制网站生成的完整 JSON。
 
@@ -150,10 +150,10 @@ New repository secret
 
 第一次使用至少需要添加下面两个 Secret：
 
-| Secret | 内容 | 必须 |
-| --- | --- | --- |
-| `DOUYIN_COOKIE` | Cookie-Editor 导出的完整 Cookie JSON | ✅ |
-| `DOUYIN_CONFIG` | 配置生成器生成的完整配置 JSON | ✅ |
+| Secret          | 内容                              | 必须 |
+| --------------- | ------------------------------- | -- |
+| `DOUYIN_COOKIE` | Cookie-Editor 导出的完整 Cookie JSON | ✅  |
+| `DOUYIN_CONFIG` | 配置生成器生成的完整配置 JSON               | ✅  |
 
 ### 5.1 添加 `DOUYIN_COOKIE`
 
@@ -318,14 +318,64 @@ Dry Run 成功后即可继续正常使用。
 
 如果希望通过钉钉接收任务结果，可以额外添加：
 
-| Secret | 内容 |
-| --- | --- |
+| Secret             | 内容            |
+| ------------------ | ------------- |
 | `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook |
-| `DINGTALK_SECRET` | 钉钉机器人 Secret |
+| `DINGTALK_SECRET`  | 钉钉机器人 Secret  |
 
 这两个 Secret 必须同时配置。
 
 如果不需要钉钉通知，两个都不要添加即可，不影响项目正常运行。
+
+---
+
+## 10.1 运行结果发到 QQ 邮箱（可选）
+
+除了钉钉，也可以让工作流在**每次运行结束后**（无论成功还是失败）把结果摘要和运行日志发送到你的 QQ 邮箱。
+
+该功能已内置在 `.github/workflows/send.yml` 中，不需要额外安装任何第三方 Action，使用 Python 标准库通过 QQ 邮箱 SMTP 发送。
+
+### 准备 QQ 邮箱授权码
+
+QQ 邮箱的 SMTP 登录密码**不是你的 QQ 密码**，而是专门的「授权码」。获取步骤：
+
+1. 电脑浏览器打开 **<https://mail.qq.com>** 并登录；
+2. 点击右上角 **设置** → **账户**（新版界面叫「账号与安全」）；
+3. 找到 **POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV 服务**；
+4. 开启 **IMAP/SMTP 服务**（或 POP3/SMTP 服务）；
+5. 按提示用绑定手机发送短信验证；
+6. 验证后会显示一串 **16 位授权码**（形如 `abcd efgh ijkl mnop`），复制保存。
+
+> 如果界面没有该入口，说明账号未开启 SMTP；Foxmail 邮箱（`@foxmail.com`）同样在 mail.qq.com 按上述步骤开启，入口一致。
+
+### 添加 Secrets
+
+在仓库 `Settings` → `Secrets and variables` → `Actions` 中添加下面两个 Secret（Foxmail 邮箱同样适用）：
+
+| Secret             | 内容                                                  |
+| ------------------ | --------------------------------------------------- |
+| `QQ_SMTP_USER`     | 你的 QQ 邮箱地址，如 `123456789@qq.com` 或 `xxx@foxmail.com` |
+| `QQ_SMTP_AUTHCODE` | 上面拿到的授权码（**去掉空格**）                                  |
+
+这两个 Secret 必须同时配置，工作流才会发送邮件。
+
+如果不需要邮件通知，两个都不要添加即可，不影响项目正常运行。
+
+### 邮件内容
+
+发送条件：工作流结束即触发（`if: always()`），成功和失败都会收到。
+
+邮件包含：
+
+- 触发方式（`workflow_dispatch` 或 `schedule`）；
+- 运行状态（success / failure）；
+- 提交号与运行链接；
+- 最近 **8000 字** 的运行日志正文。
+
+### 调整发送行为
+
+- **只在成功时发**：把 `send.yml` 中 `Send result to QQ Mail` 步骤的 `if: always()` 改成 `if: success()`。
+- **发给其他人**：保持 `QQ_SMTP_USER` 为发件人（SMTP 鉴权要求），把脚本里的 `msg["To"] = user` 改成对方邮箱地址即可。
 
 ---
 
