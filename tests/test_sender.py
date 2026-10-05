@@ -6,10 +6,13 @@ from app.models import Message
 from app.douyin import PageOperationError
 from app.sender import (
     LATEST_OUTGOING_MESSAGE,
+    OUTGOING_MESSAGES,
     SEND_BUTTONS,
     _click_and_confirm_sticker,
+    _confirm_persisted_after_reload,
     _confirm_outgoing_message,
     _confirm_sticker_sent,
+    _count_matching_outgoing_messages,
     _publish_ready,
     _restore_composer,
     _sticker_resource_key,
@@ -333,6 +336,110 @@ async def test_send_text_raises_when_confirmation_fails(monkeypatch) -> None:
 
     with pytest.raises(PageOperationError, match="没有检测到新的已发送消息"):
         await send_text(chat, "你好")
+
+
+@pytest.mark.asyncio
+async def test_count_matching_outgoing_messages_uses_expected_text() -> None:
+    page = MagicMock()
+    page.evaluate = AsyncMock(return_value=3)
+
+    count = await _count_matching_outgoing_messages(page, expected_text="续火")
+
+    assert count == 3
+    assert page.evaluate.await_args.kwargs["arg"] == [OUTGOING_MESSAGES, "", "续火", False]
+
+
+@pytest.mark.asyncio
+async def test_persisted_confirmation_reloads_and_requires_new_matching_message() -> None:
+    page = MagicMock()
+    page.wait_for_timeout = AsyncMock()
+    page.reload = AsyncMock()
+    page.wait_for_function = AsyncMock()
+    chat = MagicMock()
+    chat.open_target = AsyncMock()
+    latest_group = MagicMock()
+    latest = MagicMock()
+    latest_group.first = latest
+    marker_group = MagicMock()
+    marker = MagicMock()
+    marker_group.first = marker
+    marker.count = AsyncMock(return_value=0)
+    latest.locator.return_value = marker_group
+    page.locator.return_value = latest_group
+
+    await _confirm_persisted_after_reload(
+        page,
+        chat,
+        "好友A",
+        2,
+        label="文字",
+        expected_text="续火",
+    )
+
+    page.reload.assert_awaited_once_with(wait_until="domcontentloaded", timeout=45_000)
+    chat.open_target.assert_awaited_once_with("好友A", retries=1)
+    assert page.wait_for_function.await_args.kwargs["arg"] == [
+        OUTGOING_MESSAGES,
+        LATEST_OUTGOING_MESSAGE,
+        2,
+        "",
+        "续火",
+        False,
+    ]
+    assert page.wait_for_timeout.await_args_list[0].args == (5_000,)
+    assert page.wait_for_timeout.await_args_list[-1].args == (2_000,)
+
+
+@pytest.mark.asyncio
+async def test_persisted_confirmation_reports_uncertain_after_reload() -> None:
+    page = MagicMock()
+    page.wait_for_timeout = AsyncMock()
+    page.reload = AsyncMock()
+    page.wait_for_function = AsyncMock(side_effect=TimeoutError)
+    chat = MagicMock()
+    chat.open_target = AsyncMock()
+
+    with pytest.raises(PageOperationError, match="结果不确定"):
+        await _confirm_persisted_after_reload(
+            page,
+            chat,
+            "好友A",
+            0,
+            label="文字",
+            expected_text="续火",
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_text_runs_persistence_check_when_target_is_known(monkeypatch) -> None:
+    page = MagicMock()
+    page.keyboard.insert_text = AsyncMock()
+    page.wait_for_function = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+    editor = MagicMock()
+    editor.click = AsyncMock()
+    editor.page = page
+    chat = MagicMock()
+    chat.message_input = AsyncMock(return_value=editor)
+    count = AsyncMock(return_value=4)
+    persisted = AsyncMock()
+    monkeypatch.setattr("app.sender._count_matching_outgoing_messages", count)
+    monkeypatch.setattr("app.sender._mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old")))
+    monkeypatch.setattr("app.sender._trigger_send", AsyncMock())
+    monkeypatch.setattr("app.sender._confirm_outgoing_message", AsyncMock())
+    monkeypatch.setattr("app.sender._confirm_persisted_after_reload", persisted)
+
+    await send_text(chat, "续火", target_name="好友A")
+
+    count.assert_awaited_once_with(page, expected_text="续火")
+    persisted.assert_awaited_once_with(
+        page,
+        chat,
+        "好友A",
+        4,
+        label="文字",
+        expected_text="续火",
+    )
 
 
 @pytest.mark.asyncio

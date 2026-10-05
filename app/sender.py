@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import secrets
 from urllib.parse import urlsplit
@@ -9,6 +10,9 @@ from playwright.async_api import Page
 from app.douyin import DouyinChat, PageOperationError, first_visible
 from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
+
+
+LOGGER = logging.getLogger("douyin_sender")
 
 
 SEND_BUTTONS = (
@@ -46,10 +50,11 @@ async def _publish_ready(page: Page) -> bool:
     return False
 
 
-LATEST_OUTGOING_MESSAGE = (
-    '.messageMessageListlist [data-index="0"] '
+OUTGOING_MESSAGES = (
+    '.messageMessageListlist '
     '.messageMessageBoxmessageBox:has(.messageMessageBoxcontentBox.messageMessageBoxisFromMe)'
 )
+LATEST_OUTGOING_MESSAGE = f'.messageMessageListlist [data-index="0"] {OUTGOING_MESSAGES.split(" ", 1)[1]}'
 MESSAGE_CONFIRM_ANCHOR = "data-douyin-sender-anchor"
 SEND_FAILURE_MARKERS = (
     "text=发送失败",
@@ -60,28 +65,41 @@ SEND_FAILURE_MARKERS = (
 )
 
 
-async def send_message(page: Page, chat: DouyinChat, message: Message, stickers: dict[str, Sticker]) -> None:
+async def send_message(
+    page: Page,
+    chat: DouyinChat,
+    message: Message,
+    stickers: dict[str, Sticker],
+    *,
+    target_name: str | None = None,
+) -> None:
     if message.type == "random":
-        await send_message(page, chat, random.choice(message.choices), stickers)
+        await send_message(
+            page,
+            chat,
+            random.choice(message.choices),
+            stickers,
+            target_name=target_name,
+        )
         return
     if message.type == "text":
-        await send_text(chat, message.content or "")
+        await send_text(chat, message.content or "", target_name=target_name)
         return
     if message.type == "image":
         if message.path is None:
             raise PageOperationError("图片消息缺少文件路径")
-        await send_image(page, message.path.as_posix())
+        await send_image(page, message.path.as_posix(), chat=chat, target_name=target_name)
         return
     if message.type == "douyin_sticker":
         sticker = stickers.get(message.sticker or "")
         if sticker is None:
             raise PageOperationError(f"没有原生表情映射: {message.sticker}")
-        await send_douyin_sticker(page, sticker)
+        await send_douyin_sticker(page, sticker, chat=chat, target_name=target_name)
         return
     raise PageOperationError(f"不支持的消息类型: {message.type}")
 
 
-async def send_text(chat: DouyinChat, content: str) -> None:
+async def send_text(chat: DouyinChat, content: str, *, target_name: str | None = None) -> None:
     editor = await chat.message_input()
     page = editor.page
     await editor.click()
@@ -98,13 +116,34 @@ async def send_text(chat: DouyinChat, content: str) -> None:
     except Exception as exc:
         raise PageOperationError("文字未能写入聊天输入框") from exc
 
+    before_count = 0
+    if target_name is not None:
+        before_count = await _count_matching_outgoing_messages(page, expected_text=content)
     before = await _mark_latest_outgoing_message(page)
     await page.wait_for_timeout(300)
     await _trigger_send(page)
     await _confirm_outgoing_message(page, before, label="文字", expected_text=content)
+    if target_name is not None:
+        await _confirm_persisted_after_reload(
+            page,
+            chat,
+            target_name,
+            before_count,
+            label="文字",
+            expected_text=content,
+        )
 
 
-async def send_image(page: Page, image_path: str) -> None:
+async def send_image(
+    page: Page,
+    image_path: str,
+    *,
+    chat: DouyinChat | None = None,
+    target_name: str | None = None,
+) -> None:
+    before_count = 0
+    if chat is not None and target_name is not None:
+        before_count = await _count_matching_outgoing_messages(page, expect_image=True)
     message_items = page.locator('[data-e2e="msg-item-content"]')
     before = await message_items.count()
     file_input = None
@@ -127,6 +166,15 @@ async def send_image(page: Page, image_path: str) -> None:
         )
     except Exception as exc:
         raise PageOperationError("图片消息已触发发送，但无法确认是否发送成功；为避免重复不会自动重试") from exc
+    if chat is not None and target_name is not None:
+        await _confirm_persisted_after_reload(
+            page,
+            chat,
+            target_name,
+            before_count,
+            label="图片",
+            expect_image=True,
+        )
 
 
 async def _restore_composer(page: Page, timeout_ms: int = 10_000) -> None:
@@ -145,7 +193,13 @@ async def _restore_composer(page: Page, timeout_ms: int = 10_000) -> None:
         pass
 
 
-async def send_douyin_sticker(page: Page, sticker: Sticker) -> None:
+async def send_douyin_sticker(
+    page: Page,
+    sticker: Sticker,
+    *,
+    chat: DouyinChat | None = None,
+    target_name: str | None = None,
+) -> None:
     before = await _mark_latest_outgoing_message(page)
     try:
         button = await first_visible(page, STICKER_BUTTONS)
@@ -163,7 +217,7 @@ async def send_douyin_sticker(page: Page, sticker: Sticker) -> None:
             candidate = item.nth(index)
             description = candidate.locator('.emojiEmojiItememojiItemDesc')
             if await description.count() and (await description.first.inner_text()).strip() == name:
-                await _click_and_confirm_sticker(page, candidate, before, name)
+                await _click_and_confirm_sticker(page, candidate, before, name, chat, target_name)
                 return
 
         candidates = (
@@ -175,13 +229,20 @@ async def send_douyin_sticker(page: Page, sticker: Sticker) -> None:
         )
         for candidate in candidates:
             if await candidate.count() and await candidate.first.is_visible():
-                await _click_and_confirm_sticker(page, candidate.first, before, name)
+                await _click_and_confirm_sticker(page, candidate.first, before, name, chat, target_name)
                 return
 
         if sticker.fallback_index is not None:
             items = panel.locator('[role="button"], img, [aria-label], [title]')
             if await items.count() > sticker.fallback_index:
-                await _click_and_confirm_sticker(page, items.nth(sticker.fallback_index), before, name)
+                await _click_and_confirm_sticker(
+                    page,
+                    items.nth(sticker.fallback_index),
+                    before,
+                    name,
+                    chat,
+                    target_name,
+                )
                 return
         raise PageOperationError(f"在抖音表情面板中找不到原生表情: {sticker.name}")
     finally:
@@ -207,8 +268,22 @@ async def _mark_latest_outgoing_message(page: Page) -> tuple[str, str]:
     return anchor, before_content
 
 
-async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], name: str) -> None:
+async def _click_and_confirm_sticker(
+    page: Page,
+    item,
+    before: tuple[str, str],
+    name: str,
+    chat: DouyinChat | None = None,
+    target_name: str | None = None,
+) -> None:
     resource_key = await _sticker_resource_key(item)
+    before_count = 0
+    if chat is not None and target_name is not None:
+        before_count = await _count_matching_outgoing_messages(
+            page,
+            resource_key=resource_key,
+            expect_image=not bool(resource_key),
+        )
     await item.click(force=True)
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
@@ -218,6 +293,16 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
             await _confirm_sticker_sent(page, before, name, resource_key)
         else:
             raise
+    if chat is not None and target_name is not None:
+        await _confirm_persisted_after_reload(
+            page,
+            chat,
+            target_name,
+            before_count,
+            label=f"原生表情“{name}”",
+            resource_key=resource_key,
+            expect_image=not bool(resource_key),
+        )
 
 
 async def _sticker_resource_key(item) -> str:
@@ -238,6 +323,104 @@ async def _confirm_sticker_sent(
     resource_key: str = "",
 ) -> None:
     await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
+
+
+async def _count_matching_outgoing_messages(
+    page: Page,
+    *,
+    resource_key: str = "",
+    expected_text: str = "",
+    expect_image: bool = False,
+) -> int:
+    try:
+        value = await page.evaluate(
+            """([selector, expectedResource, expectedText, expectImage]) => {
+                const normalize = value => (value || '')
+                    .replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]+/g, ' ')
+                    .trim();
+                return [...document.querySelectorAll(selector)].filter(message => {
+                    const content = message.querySelector('[data-e2e="msg-item-content"]') || message;
+                    if (expectedText) {
+                        return normalize(content.innerText).includes(normalize(expectedText));
+                    }
+                    const images = [...content.querySelectorAll('img')];
+                    if (expectedResource) {
+                        return images.some(image => (image.src || '').includes(expectedResource));
+                    }
+                    return expectImage && images.length > 0;
+                }).length;
+            }""",
+            arg=[OUTGOING_MESSAGES, resource_key, expected_text, expect_image],
+        )
+        return int(value)
+    except Exception as exc:
+        raise PageOperationError("发送前无法记录聊天状态；为避免误判，本条消息未发送") from exc
+
+
+async def _confirm_persisted_after_reload(
+    page: Page,
+    chat: DouyinChat,
+    target_name: str,
+    before_count: int,
+    *,
+    label: str,
+    resource_key: str = "",
+    expected_text: str = "",
+    expect_image: bool = False,
+) -> None:
+    LOGGER.info("%s已在本地页面出现，准备刷新聊天确认服务器已保存", label)
+    try:
+        # Douyin can optimistically render an outgoing bubble before the backend
+        # accepts it. Reloading removes that local-only state. Reopen the exact
+        # target and require one more matching outgoing message than existed
+        # before the send, so a repeated daily phrase cannot be mistaken for a
+        # newly persisted message.
+        await page.wait_for_timeout(5_000)
+        await page.reload(wait_until="domcontentloaded", timeout=45_000)
+        await chat.open_target(target_name, retries=1)
+        await page.wait_for_function(
+            """([allSelector, latestSelector, previousCount, expectedResource, expectedText, expectImage]) => {
+                const normalize = value => (value || '')
+                    .replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]+/g, ' ')
+                    .trim();
+                const matches = message => {
+                    const content = message.querySelector('[data-e2e="msg-item-content"]') || message;
+                    if (expectedText) {
+                        return normalize(content.innerText).includes(normalize(expectedText));
+                    }
+                    const images = [...content.querySelectorAll('img')];
+                    if (expectedResource) {
+                        return images.some(image => (image.src || '').includes(expectedResource));
+                    }
+                    return expectImage && images.length > 0;
+                };
+                const matchingCount = [...document.querySelectorAll(allSelector)].filter(matches).length;
+                const latest = document.querySelector(latestSelector);
+                return matchingCount > previousCount && latest !== null && matches(latest);
+            }""",
+            arg=[
+                OUTGOING_MESSAGES,
+                LATEST_OUTGOING_MESSAGE,
+                before_count,
+                resource_key,
+                expected_text,
+                expect_image,
+            ],
+            timeout=20_000,
+        )
+        await page.wait_for_timeout(2_000)
+        latest = page.locator(LATEST_OUTGOING_MESSAGE).first
+        for selector in SEND_FAILURE_MARKERS:
+            marker = latest.locator(selector).first
+            if await marker.count() and await marker.is_visible():
+                raise PageOperationError(f"{label}刷新后显示发送失败")
+    except PageOperationError:
+        raise
+    except Exception as exc:
+        raise PageOperationError(
+            f"{label}出现过本地发送气泡，但刷新聊天后无法确认已保存；结果不确定，为避免重复不会自动重试"
+        ) from exc
+    LOGGER.info("%s刷新聊天后仍存在，已确认服务器保存", label)
 
 
 async def _confirm_outgoing_message(

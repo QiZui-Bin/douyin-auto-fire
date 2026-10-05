@@ -147,4 +147,5 @@ async def test_waits_between_consecutive_messages_for_same_friend(monkeypatch, t
 
     assert await main_module.run() == 0
     assert send_message.await_count == 2
+    assert all(call.kwargs["target_name"] == "好友A" for call in send_message.await_args_list)
     assert sleeps == [0.5]

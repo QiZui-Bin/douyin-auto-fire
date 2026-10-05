@@ -82,7 +82,13 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 if task.prevent_duplicates:
                                     history.reserve(key)
                                 await verify_login(page, timeout_ms=3_000)
-                                await send_message(page, chat, message, task.stickers)
+                                await send_message(
+                                    page,
+                                    chat,
+                                    message,
+                                    task.stickers,
+                                    target_name=target.name,
+                                )
                                 if task.prevent_duplicates:
                                     history.mark_success(key)
                                 sent += 1
