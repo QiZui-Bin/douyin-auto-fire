@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -350,10 +350,9 @@ async def test_count_matching_outgoing_messages_uses_expected_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persisted_confirmation_reloads_and_requires_new_matching_message() -> None:
+async def test_persisted_confirmation_reopens_private_messages_and_requires_new_match() -> None:
     page = MagicMock()
     page.wait_for_timeout = AsyncMock()
-    page.reload = AsyncMock()
     page.wait_for_function = AsyncMock()
     chat = MagicMock()
     chat.open_target = AsyncMock()
@@ -367,16 +366,17 @@ async def test_persisted_confirmation_reloads_and_requires_new_matching_message(
     latest.locator.return_value = marker_group
     page.locator.return_value = latest_group
 
-    await _confirm_persisted_after_reload(
-        page,
-        chat,
-        "好友A",
-        2,
-        label="文字",
-        expected_text="续火",
-    )
+    with patch("app.sender.open_private_messages", new=AsyncMock()) as reopen_private_messages:
+        await _confirm_persisted_after_reload(
+            page,
+            chat,
+            "好友A",
+            2,
+            label="文字",
+            expected_text="续火",
+        )
 
-    page.reload.assert_awaited_once_with(wait_until="domcontentloaded", timeout=45_000)
+    reopen_private_messages.assert_awaited_once_with(page)
     chat.open_target.assert_awaited_once_with("好友A", retries=1)
     assert page.wait_for_function.await_args.kwargs["arg"] == [
         OUTGOING_MESSAGES,
@@ -394,20 +394,20 @@ async def test_persisted_confirmation_reloads_and_requires_new_matching_message(
 async def test_persisted_confirmation_reports_uncertain_after_reload() -> None:
     page = MagicMock()
     page.wait_for_timeout = AsyncMock()
-    page.reload = AsyncMock()
     page.wait_for_function = AsyncMock(side_effect=TimeoutError)
     chat = MagicMock()
     chat.open_target = AsyncMock()
 
-    with pytest.raises(PageOperationError, match="结果不确定"):
-        await _confirm_persisted_after_reload(
-            page,
-            chat,
-            "好友A",
-            0,
-            label="文字",
-            expected_text="续火",
-        )
+    with patch("app.sender.open_private_messages", new=AsyncMock()):
+        with pytest.raises(PageOperationError, match="结果不确定"):
+            await _confirm_persisted_after_reload(
+                page,
+                chat,
+                "好友A",
+                0,
+                label="文字",
+                expected_text="续火",
+            )
 
 
 @pytest.mark.asyncio

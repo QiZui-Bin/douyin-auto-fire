@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import Page
 
+from app.browser import open_private_messages
 from app.douyin import DouyinChat, PageOperationError, first_visible
 from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
@@ -376,7 +377,13 @@ async def _confirm_persisted_after_reload(
         # before the send, so a repeated daily phrase cannot be mistaken for a
         # newly persisted message.
         await page.wait_for_timeout(5_000)
-        await page.reload(wait_until="domcontentloaded", timeout=45_000)
+        # Return through the canonical private-message entry instead of merely
+        # reloading the currently open conversation.  Douyin may restore a
+        # conversation-only shell after reload; that shell has no search box,
+        # so every later target would fail even though authentication is still
+        # valid.  open_private_messages also waits for the SPA search panel and
+        # detects login/risk-control pages before we reopen the exact target.
+        await open_private_messages(page)
         await chat.open_target(target_name, retries=1)
         await page.wait_for_function(
             """([allSelector, latestSelector, previousCount, expectedResource, expectedText, expectImage]) => {
